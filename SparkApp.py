@@ -1,6 +1,6 @@
 import os
-os.environ["SPARK_HOME"] = "/workspaces/Velib_Streaming_Project/spark-3.2.3-bin-hadoop2.7"
-os.environ['PYSPARK_SUBMIT_ARGS'] = '--jars /workspaces/Velib_Streaming_Project/spark-streaming-kafka-0-10-assembly_2.12-3.2.3.jar pyspark-shell'
+os.environ["SPARK_HOME"] = "/workspaces/Velib_Projet_Final/spark-3.2.3-bin-hadoop2.7"
+os.environ['PYSPARK_SUBMIT_ARGS'] = '--jars /workspaces/Velib_Projet_Final/spark-streaming-kafka-0-10-assembly_2.12-3.2.3.jar pyspark-shell'
 os.environ["JAVA_HOME"] = "/usr/lib/jvm/java-11-openjdk-amd64"
 import findspark
 findspark.init()
