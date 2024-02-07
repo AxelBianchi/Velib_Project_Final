@@ -1,31 +1,38 @@
 import os
-os.environ["SPARK_HOME"] = "/workspaces/Velib_Projet_Final/spark-3.2.3-bin-hadoop2.7"
-os.environ['PYSPARK_SUBMIT_ARGS'] = '--jars /workspaces/Velib_Projet_Final/spark-streaming-kafka-0-10-assembly_2.12-3.2.3.jar pyspark-shell'
+os.environ["SPARK_HOME"] = "/workspaces/Velib_Project_Final/spark-3.2.3-bin-hadoop2.7"
+os.environ['PYSPARK_SUBMIT_ARGS'] = '--jars /workspaces/Velib_Project_Final/spark-streaming-kafka-0-10-assembly_2.12-3.2.3.jar pyspark-shell'
 os.environ["JAVA_HOME"] = "/usr/lib/jvm/java-11-openjdk-amd64"
+
 import findspark
 findspark.init()
 from pyspark.sql import SparkSession
 import pyspark.sql.functions as pysqlf
 import pyspark.sql.types as pysqlt
-import time 
 
-# Todo: il faut créer un nouveau dataframe qui contient:
-    # - le code postal, le nombre total de vélo disponible par code postal, le nombre total de vélo mécanique par code postal, le nombre total de vélo electrique par code postal
-    # - Pousser ce nouveau dataframe vers une file kafka appéler velib-projet-clean
+packages = [
+    f'org.apache.spark:spark-sql-kafka-0-10_2.12:3.2.3',
+    'org.apache.kafka:kafka-clients:3.2.3'
+]
 
+# Création de la session Spark
+spark = (SparkSession.builder
+   .config("spark.jars.packages", ",".join(packages))
+   .config("spark.sql.repl.eagerEval.enabled", True)
+   .getOrCreate()
+)
 
 if __name__ == "__main__":
     # Initier spark
     spark = (SparkSession
              .builder
-             .appName("news")
+             .appName("velib-project")
              .master("local[1]")
              .config("spark.sql.shuffle.partitions", 1)
              .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.2.3")
              .getOrCreate()
              )
 
-    # Lire les données temps réel
+    # Lire les données temps réel depuis le topic Kafka
     kafka_df = (spark
                 .readStream
                 .format("kafka")
@@ -35,14 +42,17 @@ if __name__ == "__main__":
                 .load()
                 )
 
-    # Appliquer des traitements sur les données
+    # Charger les données du fichier CSV des stations
+    station_info_df = spark \
+        .read \
+        .csv("stations_information.csv", header=True)
+
+   
     schema = pysqlt.StructType([
         pysqlt.StructField("stationCode", pysqlt.StringType()),
-        pysqlt.StructField("station_id", pysqlt.StringType()),
         pysqlt.StructField("num_bikes_available", pysqlt.IntegerType()),
         pysqlt.StructField("numBikesAvailable", pysqlt.IntegerType()),
-        pysqlt.StructField("num_bikes_available_types",
-                           pysqlt.ArrayType(pysqlt.MapType(pysqlt.StringType(), pysqlt.IntegerType()))),
+        pysqlt.StructField("num_bikes_available_types", pysqlt.ArrayType(pysqlt.MapType(pysqlt.StringType(), pysqlt.IntegerType()))),
         pysqlt.StructField("num_docks_available", pysqlt.IntegerType()),
         pysqlt.StructField("numDocksAvailable", pysqlt.IntegerType()),
         pysqlt.StructField("is_installed", pysqlt.IntegerType()),
@@ -53,64 +63,43 @@ if __name__ == "__main__":
 
     kafka_df = (kafka_df
                 .select(pysqlf.from_json(pysqlf.col("value").cast("string"), schema).alias("value"))
-                .withColumn("stationCode", pysqlf.col("value.stationCode"))
-                .withColumn("station_id", pysqlf.col("value.station_id"))
-                .withColumn("stationCode", pysqlf.col("value.stationCode"))
-                .withColumn("num_bikes_available", pysqlf.col("value.num_bikes_available"))
-                .withColumn("numBikesAvailable", pysqlf.col("value.numBikesAvailable"))
-                .withColumn("num_bikes_available_types", pysqlf.col("value.num_bikes_available_types"))
-                .withColumn("num_docks_available", pysqlf.col("value.num_docks_available"))
-                .withColumn("numDocksAvailable", pysqlf.col("value.numDocksAvailable"))
-                .withColumn("is_installed", pysqlf.col("value.is_installed"))
-                .withColumn("is_returning", pysqlf.col("value.is_returning"))
-                .withColumn("is_renting", pysqlf.col("value.is_renting"))
-                .withColumn("last_reported", pysqlf.col("value.last_reported"))
-                .withColumn("mechanical ", pysqlf.col("num_bikes_available_types").getItem(0).getItem("mechanical"))
-                .withColumn("ebike ", pysqlf.col("num_bikes_available_types").getItem(1).getItem("ebike"))
+                .select("value.*")  # Sélectionner les colonnes structurées
                 )
 
-    df_station_informations = spark.read.csv("stations_information.csv", header=True)
-    df_station_informations.printSchema()
-    df_station_informations.show()
+    # Joindre les données de Kafka avec les données des stations
+    joined_df = kafka_df.join(station_info_df, kafka_df["stationCode"] == station_info_df["stationCode"], "inner")
 
+    # Calculer les indicateurs par code postal
+    indicators_df = (joined_df
+                     .groupBy("postcode")
+                     .agg(pysqlf.sum("num_bikes_available").alias("total_bikes"),
+                          pysqlf.sum("num_bikes_available").alias("total_mechanical_bikes"),
+                          pysqlf.sum("numBikesAvailable").alias("total_electric_bikes"))
+                     .withColumn("timestamp", pysqlf.current_timestamp())
+                     .select("timestamp", "postcode", "total_bikes", "total_mechanical_bikes", "total_electric_bikes")
+                     )
+    
+    # Écrire les infos dans le topic Kafka velib-projet-final-data et afficher dans la console
+    query_for_stream_2 = (indicators_df
+                        .selectExpr("CAST(timestamp AS STRING) AS key", "to_json(struct(*)) AS value")
+                        .writeStream
+                        .format("kafka")
+                        .option("kafka.bootstrap.servers", "localhost:9092")
+                        .option("topic", "velib-projet-final-data")
+                        .outputMode("update")
+                        .option("checkpointLocation", "/workspaces/Velib_Project_Final")  # Spécifiez l'emplacement du checkpoint ici
+                        .start()
+                        )
 
-
-    kafka_df = (kafka_df
-                    .join(df_station_informations, on=["stationCode", "station_id"], how="left")
+    # Écrire les infos dans la console
+    query_console = (indicators_df
+                    .writeStream
+                    .outputMode("update")
+                    .format("console")
+                    .start()
                     )
 
-    # Préparer les données pour envoyer vers une file kafka
-    col_selections = ["stationCode", "station_id", "last_reported", "num_bikes_available"]
-
-    df_out = (kafka_df
-                .withColumn("value", pysqlf.to_json(pysqlf.struct(*col_selections)) )
-                .select("value")
-                )
-
-    out = (df_out
-           .writeStream
-           .format("kafka")
-           .queryName("velib-projet-final-data")
-           .option("kafka.bootstrap.servers", "localhost:9092")
-           .option("topic", "velib-projet-final-data")
-           .outputMode("append")
-           .option("checkpointLocation", "chk-point-dir")
-           .trigger(processingTime="1 second")
-           .start()
-           )
-
-# Attendez que Spark Streaming soit actif
-while not spark.streams.active:
-    time.sleep(1)
-
-df_out.createOrReplaceTempView("velib-projet-final-data")
-
-# Ajout de la vérification pour voir si le DataFrame est vide
-while spark.streams.active:
-    if spark.sql("SELECT COUNT(*) AS count FROM `velib-projet-final-data`").collect()[0]["count"] > 0:
-        print("Des données sont disponibles.")
-    else:
-        print("Aucune donnée disponible.")
-    time.sleep(5)
-
-out.awaitTermination()
+    #terminaison de la requête kafka
+    query_for_stream_2.awaitTermination()
+    #Terminaison de la requête console
+    query_console.awaitTermination()
